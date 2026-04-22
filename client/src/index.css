@@ -1,0 +1,28 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-ink text-slate-100 font-body antialiased;
+  background-image:
+    radial-gradient(circle at top left, rgba(0, 212, 184, 0.12), transparent 30%),
+    radial-gradient(circle at top right, rgba(240, 180, 41, 0.1), transparent 35%),
+    linear-gradient(180deg, #080c10 0%, #091118 50%, #080c10 100%);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.grid-overlay {
+  background-image:
+    linear-gradient(rgba(30, 45, 61, 0.16) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(30, 45, 61, 0.16) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
