@@ -1,4 +1,4 @@
-import { getNextMarketSession, isHolidayAdjacentSession, isMarketHoliday, isMarketOpenDay } from "./marketCalendar.js";
+import { isHolidayAdjacentSession, isMarketHoliday, isMarketOpenDay } from "./marketCalendar.js";
 
 export function dateFromIso(isoString) {
   return new Date(`${isoString}T12:00:00Z`);
@@ -47,5 +47,5 @@ export function isHolidayBlockedDay(isoString) {
 
   const nextCalendarDay = new Date(date);
   nextCalendarDay.setUTCDate(nextCalendarDay.getUTCDate() + 1);
-  return isMarketHoliday(nextCalendarDay) || Boolean(getNextMarketSession);
+  return isMarketHoliday(nextCalendarDay);
 }
