@@ -79,8 +79,6 @@ export async function runEntryValidation(payload) {
 export async function saveTrade(payload) {
   const data = await readData();
   const validation = validateEntry(payload, data.settings);
-  if (validation.status === "BLOCKED") throw new Error("Trade is blocked by the entry validator and cannot be saved.");
-
   const slot = slotFromTradeDay(payload.trade_day);
   const current = data.trades[slot];
   if (current.status === "OPEN") throw new Error(`${current.label} slot already has an open trade.`);
@@ -102,6 +100,9 @@ export async function saveTrade(payload) {
     vix_at_entry: Number(payload.vix),
     vix9d_at_entry: Number(payload.vix9d),
     hwm_pct: 0,
+    hwm_source: "entry",
+    entry_validation_status: validation.status,
+    entry_validation_messages: validation.messages,
     last_check: null,
     last_metrics: null,
     manual_inputs: { ...freshManualInputs(), ...(payload.manual_inputs || {}) },
@@ -153,6 +154,8 @@ export async function checkTrade(id, manualInputs = {}) {
   const providedHwm = coalesceMetric(manualOnlyInputs.hwm_pct, scraped.metrics?.hwm_pct);
   const current_dte = coalesceMetric(manualOnlyInputs.current_dte, scraped.metrics?.current_dte);
   const hwm_pct = Math.max(trade.hwm_pct || 0, Number(coalesceMetric(providedHwm, current_pl_pct ?? 0)));
+  const previousHwm = Number(trade.hwm_pct || 0);
+  const hwmImproved = hwm_pct > previousHwm;
 
   if (current_pl_pct === null || current_pl_pct === undefined || current_dte === null || current_dte === undefined) {
     return { ok: false, requiresManualInput: true, message: scraped.message, scrape: scraped };
@@ -188,6 +191,7 @@ export async function checkTrade(id, manualInputs = {}) {
     day_number: payload.trade_day_number,
     optionstrat_url: activeOptionStratUrl,
     hwm_pct,
+    hwm_source: hwmImproved ? "optionstrat-poll" : trade.hwm_source,
     last_check: timestamp,
     last_metrics: { current_pl_pct: Number(current_pl_pct), hwm_pct, current_dte: Number(current_dte) },
     manual_inputs: mergedManual,
@@ -198,10 +202,22 @@ export async function checkTrade(id, manualInputs = {}) {
   if (shouldAlertForVerdict(verdict) && trade.last_alert_key !== alertKey) {
     data.trades[slot].last_alert_key = alertKey;
   }
+  if (hwmImproved && verdict.rule === "HOLD") {
+    data.trades[slot].last_alert_key = `${trade.id}:HWM:${hwm_pct.toFixed(1)}`;
+  }
 
   await writeData(data);
   if (shouldAlertForVerdict(verdict) && trade.last_alert_key !== alertKey) {
     try { await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), verdict, data.settings); } catch (error) { console.error("Telegram verdict alert failed:", error); }
+  }
+  if (hwmImproved && verdict.rule === "HOLD") {
+    try {
+      await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), {
+        verdict: "NEW HWM",
+        rule: "HWM",
+        reason: `New highest P/L reached: ${hwm_pct.toFixed(1)}%. This is the number to compare against the Day 4 / 20% binary separator.`
+      }, data.settings);
+    } catch (error) { console.error("Telegram HWM alert failed:", error); }
   }
 
   return { ok: true, scrape: scraped, trade: decorateTrade(data.trades[slot], data.settings), verdict };
@@ -213,6 +229,10 @@ export async function runScheduledChecks() {
   const results = [];
   for (const trade of openTrades) results.push(await checkTrade(trade.id, trade.manual_inputs));
   return results;
+}
+
+export async function pollOpenTradesForHwm() {
+  return runScheduledChecks();
 }
 
 export async function triggerTelegramTest() {
