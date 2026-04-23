@@ -4,6 +4,16 @@ function asNumber(value) {
 
 export function validateEntry(payload, settings) {
   const legs = Array.isArray(payload.legs) ? payload.legs : [];
+  const normalizedLegs = legs.map((leg) => ({
+    ...leg,
+    strike: leg.strike === "" || leg.strike === null || leg.strike === undefined ? "" : Number(leg.strike),
+    dte: leg.dte === "" || leg.dte === null || leg.dte === undefined ? "" : Number(leg.dte)
+  }));
+  const shortCall = normalizedLegs.find((leg) => String(leg.role || "").toLowerCase() === "short_call");
+  const longCallLower = normalizedLegs.find((leg) => String(leg.role || "").toLowerCase() === "long_call_lower");
+  const longCallUpper = normalizedLegs.find((leg) => String(leg.role || "").toLowerCase() === "long_call_upper");
+  const shortPut = normalizedLegs.find((leg) => String(leg.role || "").toLowerCase() === "short_put_calendar");
+  const longPut = normalizedLegs.find((leg) => String(leg.role || "").toLowerCase() === "long_put_calendar");
   const hasInput = payload.vix !== "" || payload.vix9d !== "" || legs.some((leg) => leg.premium !== "" || leg.dte !== "" || leg.strike !== "");
 
   if (!hasInput) {
@@ -46,6 +56,26 @@ export function validateEntry(payload, settings) {
 
   if (vix < settings.vix_block_low || vix > settings.vix_block_high) {
     elevate("BLOCKED", `BLOCKED — VIX ${vix.toFixed(1)} is outside the safe entry zone (${settings.vix_block_low}–${settings.vix_block_high}). Do not open a trade today.`, "R1");
+  }
+
+  if (shortPut && longPut && shortPut.strike !== "" && longPut.strike !== "" && shortPut.strike !== longPut.strike) {
+    elevate("CAUTION", `CAUTION — Put calendar strikes should match. Short put is ${shortPut.strike}, long put is ${longPut.strike}.`, "PUT-CALENDAR-STRIKE");
+  }
+
+  if (shortPut && shortPut.dte !== "" && shortPut.dte !== 8) {
+    elevate("CAUTION", `CAUTION — Short put calendar leg should be 8 DTE. Current value is ${shortPut.dte}.`, "PUT-CALENDAR-DTE");
+  }
+
+  if (longPut && longPut.dte !== "" && longPut.dte !== 12) {
+    elevate("CAUTION", `CAUTION — Long put calendar leg should be 12 DTE. Current value is ${longPut.dte}.`, "PUT-CALENDAR-DTE");
+  }
+
+  if (shortCall && longCallLower && longCallUpper && shortCall.strike !== "" && longCallLower.strike !== "" && longCallUpper.strike !== "") {
+    const lowerWidth = shortCall.strike - longCallLower.strike;
+    const upperWidth = longCallUpper.strike - shortCall.strike;
+    if (lowerWidth !== 30 || upperWidth !== 30) {
+      elevate("CAUTION", `CAUTION — Call butterfly wings should be 30 points wide. Current wings are -${lowerWidth} / +${upperWidth}.`, "CALL-BFLY-WIDTH");
+    }
   }
 
   if (slRatio < settings.sl_ratio_floor) {
