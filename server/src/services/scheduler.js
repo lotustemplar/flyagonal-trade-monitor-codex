@@ -1,7 +1,7 @@
 import cron from "node-cron";
 import { readData } from "../lib/storage.js";
 import { refreshCalendarGate } from "./calendarGate.js";
-import { runScheduledChecks } from "./tradeService.js";
+import { pollOpenTradesForHwm, runScheduledChecks } from "./tradeService.js";
 import { todayIso } from "../lib/dateUtils.js";
 
 let tasks = [];
@@ -38,7 +38,11 @@ export async function startScheduler() {
     try { await runScheduledChecks(); } catch (error) { console.error("Scheduled trade check failed:", error); }
   }, { timezone: timeZone });
 
-  tasks = [calendarTask, tradeTaskOne, tradeTaskTwo];
+  const hwmPollTask = cron.schedule("*/2 * * * 1-5", async () => {
+    try { await pollOpenTradesForHwm(); } catch (error) { console.error("2-minute HWM poll failed:", error); }
+  }, { timezone: timeZone });
+
+  tasks = [calendarTask, tradeTaskOne, tradeTaskTwo, hwmPollTask];
 }
 
 export async function refreshScheduler() {
