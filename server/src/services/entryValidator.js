@@ -38,7 +38,8 @@ export function validateEntry(payload, settings) {
   const totalValue = shortValue + longValue;
   const totalContracts = legs.reduce((sum, leg) => sum + asNumber(leg.qty), 0);
   const netPremium = shortValue - longValue;
-  const premiumPerContract = totalContracts > 0 ? Math.abs(netPremium) / totalContracts : 0;
+  const packageCount = Math.max(1, ...legs.filter((leg) => String(leg.role || "").toLowerCase() === "short_put_calendar").map((leg) => asNumber(leg.qty)));
+  const premiumPerContract = packageCount > 0 ? Math.abs(netPremium) / packageCount : Math.abs(netPremium);
   const slRatio = longValue > 0 ? shortValue / longValue : 0;
   const messages = [];
   let status = "APPROVED";
