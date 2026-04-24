@@ -23,6 +23,11 @@ export function getDailyVerdict(trade, settings) {
   const approachingThreshold = profitTargetPct * settings.approaching_profit_target_fraction;
   const entryVix = num(trade.vix_at_entry);
   const isCautionZone = entryVix !== null && entryVix >= settings.vix_optimal_high && entryVix < settings.vix_caution_high;
+  const currentDay = num(trade.trade_day_number) ?? 0;
+  const vixChangeFromEntry = num(trade.vix_change_from_entry);
+  const trendLast24h = trade.trade_value_trend_last_24h || null;
+  const peakDayNumber = num(trade.peak_day_number);
+  const entryDay = String(trade.entry_day || "");
 
   if (currentPl !== null && currentPl >= profitTargetPct) {
     return {
@@ -43,10 +48,19 @@ export function getDailyVerdict(trade, settings) {
   }
 
   if (currentDte === settings.checkpoint_scaleout_dte && highestPnlYet < settings.checkpoint_hwm_pct) {
+    if (trendLast24h === "rising") {
+      return {
+        verdict: "KEEP TRADE OPEN - RECOVERY WATCH",
+        severity: "AMBER",
+        reason: `4 DTE - Highest P/L yet is still below ${settings.checkpoint_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%), but the trade is rising over the last ${settings.recovery_trend_window_hours}h. Hold for now and bail at ${settings.bail_dte} DTE if HWM is still below ${settings.bail_hwm_pct.toFixed(1)}%.`,
+        rule: "RECOVERY-4DTE"
+      };
+    }
+
     return {
       verdict: "SCALE OUT 50%",
       severity: "AMBER",
-      reason: `4 DTE CHECKPOINT - Highest P/L yet never hit ${settings.checkpoint_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%). Scale out half at market open.`,
+      reason: `4 DTE CHECKPOINT - Highest P/L yet never hit ${settings.checkpoint_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%) and the trade is still ${trendLast24h === "declining" ? "declining" : "not showing a recovery bounce"}. Scale out half at market open.`,
       rule: "CHECKPOINT-4DTE"
     };
   }
@@ -61,7 +75,7 @@ export function getDailyVerdict(trade, settings) {
     return {
       verdict: "SCALE OUT 50%",
       severity: "AMBER",
-      reason: `CAUTION ZONE OVERRIDE - Entry VIX was between ${settings.vix_optimal_high} and ${settings.vix_caution_high}, HWM did clear ${settings.checkpoint_hwm_pct.toFixed(1)}%, but current P/L has faded to ${currentPl.toFixed(1)}% at 4 DTE. Scale out half and tighten management.`,
+      reason: `CAUTION ZONE OVERRIDE - Entry VIX was between ${settings.vix_optimal_high} and ${settings.vix_caution_high}, HWM cleared ${settings.checkpoint_hwm_pct.toFixed(1)}%, but current P/L has faded to ${currentPl.toFixed(1)}% at 4 DTE. Scale out half and tighten management.`,
       rule: "CAUTION-4DTE"
     };
   }
@@ -72,6 +86,35 @@ export function getDailyVerdict(trade, settings) {
       severity: "RED",
       reason: `2 DTE BAIL - Highest P/L yet never hit ${settings.bail_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%). Close everything at market open.`,
       rule: "BAIL-2DTE"
+    };
+  }
+
+  if (
+    vixChangeFromEntry !== null &&
+    vixChangeFromEntry < -settings.day2_vix_warning_drop_points &&
+    currentDay <= 2 &&
+    highestPnlYet < settings.day2_vix_warning_hwm_pct
+  ) {
+    return {
+      verdict: "KEEP TRADE OPEN - EARLY WARNING",
+      severity: "AMBER",
+      reason: `VIX dropped ${Math.abs(vixChangeFromEntry).toFixed(2)} points from entry within the first ${currentDay || 2} days and highest P/L yet is still below ${settings.day2_vix_warning_hwm_pct.toFixed(1)}%. Elevated risk - monitor closely.`,
+      rule: "DAY2-VIX-WARN"
+    };
+  }
+
+  if (
+    highestPnlYet >= settings.stale_peak_hwm_min &&
+    currentPl !== null &&
+    currentPl < highestPnlYet * settings.stale_peak_drawdown_fraction &&
+    peakDayNumber !== null &&
+    currentDay - peakDayNumber >= settings.stale_peak_days
+  ) {
+    return {
+      verdict: "KEEP TRADE OPEN - STALE PEAK WARNING",
+      severity: "AMBER",
+      reason: `Trade peaked at ${highestPnlYet.toFixed(1)}% but has given back more than ${((1 - settings.stale_peak_drawdown_fraction) * 100).toFixed(0)}% for ${currentDay - peakDayNumber} days. Watch closely for loser behavior.`,
+      rule: "STALE-PEAK"
     };
   }
 
@@ -99,6 +142,15 @@ export function getDailyVerdict(trade, settings) {
       severity: "GREEN",
       reason: `2 DTE - Highest P/L yet crossed ${settings.bail_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%). Historical win path remains intact.`,
       rule: "PASS-2DTE"
+    };
+  }
+
+  if (entryDay === "Wednesday" && isCautionZone) {
+    return {
+      verdict: "KEEP TRADE OPEN - WEDNESDAY CAUTION",
+      severity: "AMBER",
+      reason: "Wednesday entry in the Caution zone is the highest loss-rate combination. Manage more tightly than usual.",
+      rule: "WED-CAUTION"
     };
   }
 
