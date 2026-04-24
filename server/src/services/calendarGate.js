@@ -10,17 +10,33 @@ function isWithinWindow(targetIso, startIso, windowDays) {
   return targetIso >= startIso && targetIso <= addDays(startIso, windowDays - 1);
 }
 
+function windowDay(targetIso, startIso) {
+  const start = new Date(`${startIso}T12:00:00Z`);
+  const target = new Date(`${targetIso}T12:00:00Z`);
+  return Math.round((target.getTime() - start.getTime()) / 86400000) + 1;
+}
+
 export function evaluateCalendarGate(events, settings, _vix, currentIso) {
   const cpiDate = settings.cpi_blackout_dates.find((date) => isWithinWindow(date, currentIso, 8));
   if (cpiDate) {
-    const message = `BLOCKED — CPI blackout date ${cpiDate} falls inside the 8-day trade window. Skip the trade.`;
+    const cpiEvent = {
+      iso_date: cpiDate,
+      date: cpiDate,
+      time: "08:30",
+      currency: "USD",
+      impact: "High Impact Expected",
+      event_name: "CPI Release (Blackout)",
+      window_day: windowDay(cpiDate, currentIso)
+    };
+    const mergedEvents = [cpiEvent, ...events.filter((event) => event.iso_date !== cpiDate || !/cpi/i.test(event.event_name || ""))];
+    const message = `BLOCKED - CPI blackout date ${cpiDate} falls inside the 8-day trade window. Skip the trade.`;
     return {
       status: "BLOCKED",
       badge: "🚫 BLOCKED",
       primary_rule: "CPI-BLACKOUT",
       primary_message: message,
       triggered_rules: [{ rule: "CPI-BLACKOUT", severity: "BLOCKED", message }],
-      events
+      events: mergedEvents
     };
   }
 
