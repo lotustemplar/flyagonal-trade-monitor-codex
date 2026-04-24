@@ -105,6 +105,8 @@ function alertCodeForVerdict(verdict) {
     case "CHECKPOINT-4DTE":
     case "CAUTION-4DTE":
       return "checkpoint";
+    case "RECOVERY-4DTE":
+      return "recovery_watch";
     case "BAIL-2DTE":
       return "bail";
     case "APPROACHING-PT":
@@ -113,6 +115,12 @@ function alertCodeForVerdict(verdict) {
       return "pass_4dte";
     case "PASS-2DTE":
       return "pass_2dte";
+    case "DAY2-VIX-WARN":
+      return "early_vix_warning";
+    case "STALE-PEAK":
+      return "stale_peak_warning";
+    case "WED-CAUTION":
+      return "wed_caution";
     case "EXPIRED":
       return "expired";
     default:
@@ -122,37 +130,52 @@ function alertCodeForVerdict(verdict) {
 
 function buildThresholdAlerts(previousHwm, currentHwm, settings) {
   const alerts = [];
-  if (previousHwm < settings.checkpoint_hwm_pct && currentHwm >= settings.checkpoint_hwm_pct) {
+  if (previousHwm < settings.milestone_on_track_pct && currentHwm >= settings.milestone_on_track_pct) {
     alerts.push({
       code: "hit_15",
       verdict: {
         verdict: "CROSSED 15%",
         rule: "HIT-15",
         severity: "GREEN",
-        reason: `Crossed ${settings.checkpoint_hwm_pct.toFixed(0)}% highest P/L yet - on track.`
+        reason: `Crossed ${settings.milestone_on_track_pct.toFixed(0)}% highest P/L yet - on track.`
       }
     });
   }
-  if (previousHwm < settings.bail_hwm_pct && currentHwm >= settings.bail_hwm_pct) {
+  if (previousHwm < settings.milestone_survivor_pct && currentHwm >= settings.milestone_survivor_pct) {
     alerts.push({
-      code: "hit_20",
+      code: "hit_19",
       verdict: {
-        verdict: "CROSSED 20%",
-        rule: "HIT-20",
+        verdict: "CROSSED 19%",
+        rule: "HIT-19",
         severity: "GREEN",
-        reason: `Crossed ${settings.bail_hwm_pct.toFixed(0)}% highest P/L yet - historical win path confirmed.`
+        reason: `Crossed ${settings.milestone_survivor_pct.toFixed(0)}% highest P/L yet - historical win path confirmed.`
       }
     });
   }
   return alerts;
 }
 
-function buildUpdatedLastMetrics(previousMetrics, currentPl, currentDte, hwmPct) {
+function buildUpdatedLastMetrics(previousMetrics, currentPl, currentDte, hwmPct, trendLast24h, vixChangeFromEntry) {
   return {
     current_pl_pct: currentPl ?? previousMetrics?.current_pl_pct ?? null,
     hwm_pct: hwmPct ?? previousMetrics?.hwm_pct ?? 0,
-    current_dte: currentDte ?? previousMetrics?.current_dte ?? null
+    current_dte: currentDte ?? previousMetrics?.current_dte ?? null,
+    trade_value_trend_last_24h: trendLast24h ?? previousMetrics?.trade_value_trend_last_24h ?? null,
+    vix_change_from_entry: vixChangeFromEntry ?? previousMetrics?.vix_change_from_entry ?? null
   };
+}
+
+function deriveTrendLast24h(verdicts, currentPl, timestampIso, settings) {
+  if (currentPl === null || currentPl === undefined || !Array.isArray(verdicts) || !verdicts.length) return null;
+  const currentTime = new Date(timestampIso).getTime();
+  const recent = [...verdicts]
+    .reverse()
+    .find((item) => item?.timestamp && currentTime - new Date(item.timestamp).getTime() <= settings.recovery_trend_window_hours * 3600000);
+  if (!recent || recent.current_pl_pct === null || recent.current_pl_pct === undefined) return null;
+  const delta = currentPl - Number(recent.current_pl_pct);
+  if (delta > settings.trend_change_buffer_pct) return "rising";
+  if (delta < -settings.trend_change_buffer_pct) return "declining";
+  return "flat";
 }
 
 async function persistTradeEvaluation(data, slot, metrics, sourceMessage, sourceLabel = "optionstrat-poll") {
@@ -164,13 +187,28 @@ async function persistTradeEvaluation(data, slot, metrics, sourceMessage, source
   const highestPnlYet = Math.max(previousHighest, scrapedHighest ?? currentPl ?? 0);
   const timestamp = new Date().toISOString();
   const dayNumber = calculateTradeDayNumber(trade.entry_date, todayIso(data.settings.timezone));
+  const isNewPeak = highestPnlYet > previousHighest;
+  const peakDayNumber = isNewPeak ? dayNumber : trade.peak_day_number ?? null;
+  const peakTimestamp = isNewPeak ? timestamp : trade.peak_timestamp ?? null;
+  const trendLast24h = deriveTrendLast24h(trade.verdicts, currentPl, timestamp, data.settings);
+  const vixCurrent = asNumber(trade.manual_inputs?.vix_current);
+  const vixChangeFromEntry = vixCurrent !== null && trade.vix_at_entry !== null && trade.vix_at_entry !== undefined
+    ? vixCurrent - Number(trade.vix_at_entry)
+    : null;
+
   const verdict = getDailyVerdict(
     {
       current_pl_pct: currentPl,
       hwm_pct: highestPnlYet,
       current_dte: currentDte,
       profit_target_pct: trade.profit_target_pct,
-      vix_at_entry: trade.vix_at_entry
+      vix_at_entry: trade.vix_at_entry,
+      trade_day_number: dayNumber,
+      vix_change_from_entry: vixChangeFromEntry,
+      trade_value_trend_last_24h: trendLast24h,
+      peak_day_number: peakDayNumber,
+      entry_day: trade.label,
+      vix_zone_label: trade.vix_zone_label
     },
     data.settings
   );
@@ -181,6 +219,8 @@ async function persistTradeEvaluation(data, slot, metrics, sourceMessage, source
     hwm_pct: highestPnlYet,
     current_pl_pct: Number(currentPl),
     dte: currentDte,
+    trend_last_24h: trendLast24h,
+    vix_change_from_entry: vixChangeFromEntry,
     verdict: verdict.verdict,
     rule: verdict.rule,
     reason: verdict.reason
@@ -202,15 +242,18 @@ async function persistTradeEvaluation(data, slot, metrics, sourceMessage, source
     lastHistory.current_pl_pct !== historyItem.current_pl_pct ||
     lastHistory.hwm_pct !== historyItem.hwm_pct ||
     lastHistory.dte !== historyItem.dte ||
-    lastHistory.rule !== historyItem.rule;
+    lastHistory.rule !== historyItem.rule ||
+    lastHistory.trend_last_24h !== historyItem.trend_last_24h;
 
   data.trades[slot] = {
     ...trade,
     day_number: dayNumber,
     hwm_pct: highestPnlYet,
     hwm_source: highestPnlYet > previousHighest ? sourceLabel : trade.hwm_source,
+    peak_day_number: peakDayNumber,
+    peak_timestamp: peakTimestamp,
     last_check: timestamp,
-    last_metrics: buildUpdatedLastMetrics(trade.last_metrics, currentPl, currentDte, highestPnlYet),
+    last_metrics: buildUpdatedLastMetrics(trade.last_metrics, currentPl, currentDte, highestPnlYet, trendLast24h, vixChangeFromEntry),
     last_scrape_message: sourceMessage || null,
     verdicts: shouldAppendHistory ? [...trade.verdicts, historyItem] : trade.verdicts,
     alerts_sent: Array.from(new Set([...alertsSent, ...alertsToSend.map((item) => item.code)]))
@@ -291,6 +334,8 @@ export async function saveTrade(payload) {
     vix_zone_label: validation.vix_zone_label,
     hwm_pct: 0,
     hwm_source: "entry",
+    peak_day_number: null,
+    peak_timestamp: null,
     entry_validation_status: validation.status,
     entry_validation_messages: validation.messages,
     last_check: null,
@@ -359,7 +404,14 @@ export async function checkTrade(id, manualInputs = {}) {
     const partialDte = coalesceMetric(scraped.metrics?.current_dte, deriveCurrentDte(data.trades[slot], data.settings));
     data.trades[slot].last_check = new Date().toISOString();
     data.trades[slot].last_scrape_message = scraped.message;
-    data.trades[slot].last_metrics = buildUpdatedLastMetrics(trade.last_metrics, null, partialDte, Number(trade.hwm_pct || 0));
+    data.trades[slot].last_metrics = buildUpdatedLastMetrics(
+      trade.last_metrics,
+      null,
+      partialDte,
+      Number(trade.hwm_pct || 0),
+      trade.last_metrics?.trade_value_trend_last_24h ?? null,
+      trade.last_metrics?.vix_change_from_entry ?? null
+    );
     await writeData(data);
     return {
       ok: false,
