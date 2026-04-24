@@ -24,7 +24,7 @@ function marketHourCronExpressions(intervalMinutes) {
   return [
     `${minuteList(30, 59, safeInterval)} 9 * * 1-5`,
     `${minuteList(0, 59, safeInterval)} 10-15 * * 1-5`,
-    `${minuteList(0, 14, safeInterval)} 16 * * 1-5`
+    "0 16 * * 1-5"
   ].filter((expression) => expression.split(" ")[0]);
 }
 
