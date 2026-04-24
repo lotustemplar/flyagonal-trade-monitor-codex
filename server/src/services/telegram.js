@@ -11,10 +11,9 @@ function escapeHtml(value) {
 function iconForRule(rule) {
   if (rule === "PT-HIT") return "🎯";
   if (rule === "BAIL-2DTE") return "🚨";
-  if (rule === "CHECKPOINT-4DTE" || rule === "CAUTION-4DTE") return "⚠️";
+  if (["CHECKPOINT-4DTE", "CAUTION-4DTE", "DAY2-VIX-WARN", "STALE-PEAK", "RECOVERY-4DTE", "WED-CAUTION"].includes(rule)) return "⚠️";
   if (rule === "APPROACHING-PT") return "📈";
-  if (rule === "HIT-20" || rule === "PASS-2DTE") return "✅";
-  if (rule === "HIT-15" || rule === "PASS-4DTE") return "✅";
+  if (["HIT-15", "HIT-19", "PASS-4DTE", "PASS-2DTE"].includes(rule)) return "✅";
   if (rule === "EXPIRED") return "❌";
   return "🟨";
 }
@@ -42,14 +41,6 @@ async function postTelegramMessage(message, settings) {
   }
 
   return { ok: true };
-}
-
-export function shouldAlertForVerdict(verdict) {
-  return Boolean(verdict) && verdict.rule !== "HOLD";
-}
-
-export function buildVerdictAlertKey(verdict, trade) {
-  return `${trade.id}:${verdict.rule}:${verdict.verdict}`;
 }
 
 export async function sendTradeOpenedAlert(trade, settings) {
