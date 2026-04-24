@@ -91,12 +91,6 @@ export function validateEntry(payload, settings) {
     elevate("APPROVED", "Normal structure. Full size entry approved.", "SL-NORMAL");
   }
 
-  if (premiumPerContract < settings.premium_per_contract_floor) {
-    elevate("BLOCKED", `BLOCKED — Premium per contract is $${premiumPerContract.toFixed(2)}. This is below the absolute minimum seen in winning trades. Do not enter.`, "PREMIUM-BLOCK");
-  } else if (premiumPerContract < settings.premium_per_contract_min) {
-    elevate("CAUTION", `WARNING — Premium per contract is $${premiumPerContract.toFixed(2)}, below the $${settings.premium_per_contract_min} minimum threshold.`, "PREMIUM-LOW");
-  }
-
   if (vix9d - vix > settings.vix9d_above_gap) {
     elevate("CAUTION", `CAUTION — VIX9D (${vix9d.toFixed(1)}) significantly exceeds VIX (${vix.toFixed(1)}). Short-term IV expectations are elevated.`, "VIX9D-HIGH");
   }
