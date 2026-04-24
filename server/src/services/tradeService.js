@@ -18,6 +18,42 @@ function freshManualInputs() {
   };
 }
 
+function isoAtNoon(isoDate) {
+  return new Date(`${isoDate}T12:00:00Z`);
+}
+
+function addDays(isoDate, days) {
+  const date = isoAtNoon(isoDate);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function daysBetween(startIso, endIso) {
+  return Math.round((isoAtNoon(endIso).getTime() - isoAtNoon(startIso).getTime()) / 86400000);
+}
+
+function asNumber(value) {
+  return value === null || value === undefined || value === "" ? null : Number(value);
+}
+
+function normalizePercentValue(value) {
+  const numeric = asNumber(value);
+  return numeric === null || Number.isNaN(numeric) ? null : numeric;
+}
+
+function normalizeTargetPercent(value) {
+  const numeric = normalizePercentValue(value);
+  if (numeric === null) return null;
+  return Math.abs(numeric) <= 1 ? numeric * 100 : numeric;
+}
+
+function coalesceMetric(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== "" && !Number.isNaN(value)) return value;
+  }
+  return null;
+}
+
 function slotFromTradeDay(tradeDay) {
   const normalized = String(tradeDay || "").toLowerCase();
   if (normalized.startsWith("wed")) return "wednesday";
@@ -40,13 +76,6 @@ function generateTradeId(tradeDay, entryDate) {
   return `${tradeDay.slice(0, 3).toUpperCase()}-${entryDate}`;
 }
 
-function coalesceMetric(...values) {
-  for (const value of values) {
-    if (value !== null && value !== undefined && value !== "") return value;
-  }
-  return null;
-}
-
 function deriveFrontMonthDte(trade) {
   const legs = Array.isArray(trade?.legs) ? trade.legs : [];
   const dtes = legs
@@ -55,11 +84,18 @@ function deriveFrontMonthDte(trade) {
   return dtes.length ? Math.min(...dtes) : null;
 }
 
-function deriveCurrentDte(trade, settings) {
+function deriveExpirationDate(trade) {
+  if (trade?.expiration_date) return trade.expiration_date;
+  if (!trade?.entry_date) return null;
   const openingDte = deriveFrontMonthDte(trade);
-  if (!openingDte || !trade?.entry_date) return null;
-  const dayNumber = calculateTradeDayNumber(trade.entry_date, todayIso(settings.timezone));
-  return Math.max(openingDte - Math.max(dayNumber - 1, 0), 0);
+  if (!openingDte) return null;
+  return addDays(trade.entry_date, openingDte);
+}
+
+function deriveCurrentDte(trade, settings, asOfIso = todayIso(settings.timezone)) {
+  const expirationDate = deriveExpirationDate(trade);
+  if (!expirationDate) return null;
+  return Math.max(daysBetween(asOfIso, expirationDate), 0);
 }
 
 function alertCodeForVerdict(verdict) {
@@ -77,12 +113,14 @@ function alertCodeForVerdict(verdict) {
       return "pass_4dte";
     case "PASS-2DTE":
       return "pass_2dte";
+    case "EXPIRED":
+      return "expired";
     default:
       return null;
   }
 }
 
-function buildThresholdAlerts(previousHwm, currentHwm, trade, settings) {
+function buildThresholdAlerts(previousHwm, currentHwm, settings) {
   const alerts = [];
   if (previousHwm < settings.checkpoint_hwm_pct && currentHwm >= settings.checkpoint_hwm_pct) {
     alerts.push({
@@ -91,7 +129,7 @@ function buildThresholdAlerts(previousHwm, currentHwm, trade, settings) {
         verdict: "CROSSED 15%",
         rule: "HIT-15",
         severity: "GREEN",
-        reason: `Crossed ${settings.checkpoint_hwm_pct.toFixed(0)}% highest P/L yet — on track.`
+        reason: `Crossed ${settings.checkpoint_hwm_pct.toFixed(0)}% highest P/L yet - on track.`
       }
     });
   }
@@ -102,11 +140,92 @@ function buildThresholdAlerts(previousHwm, currentHwm, trade, settings) {
         verdict: "CROSSED 20%",
         rule: "HIT-20",
         severity: "GREEN",
-        reason: `Crossed ${settings.bail_hwm_pct.toFixed(0)}% highest P/L yet — historical win path confirmed.`
+        reason: `Crossed ${settings.bail_hwm_pct.toFixed(0)}% highest P/L yet - historical win path confirmed.`
       }
     });
   }
   return alerts;
+}
+
+function buildUpdatedLastMetrics(previousMetrics, currentPl, currentDte, hwmPct) {
+  return {
+    current_pl_pct: currentPl ?? previousMetrics?.current_pl_pct ?? null,
+    hwm_pct: hwmPct ?? previousMetrics?.hwm_pct ?? 0,
+    current_dte: currentDte ?? previousMetrics?.current_dte ?? null
+  };
+}
+
+async function persistTradeEvaluation(data, slot, metrics, sourceMessage, sourceLabel = "optionstrat-poll") {
+  const trade = data.trades[slot];
+  const currentPl = normalizePercentValue(metrics.current_pl_pct);
+  const currentDte = coalesceMetric(metrics.current_dte, deriveCurrentDte(trade, data.settings));
+  const previousHighest = Number(trade.hwm_pct || 0);
+  const scrapedHighest = normalizePercentValue(metrics.hwm_pct);
+  const highestPnlYet = Math.max(previousHighest, scrapedHighest ?? currentPl ?? 0);
+  const timestamp = new Date().toISOString();
+  const dayNumber = calculateTradeDayNumber(trade.entry_date, todayIso(data.settings.timezone));
+  const verdict = getDailyVerdict(
+    {
+      current_pl_pct: currentPl,
+      hwm_pct: highestPnlYet,
+      current_dte: currentDte,
+      profit_target_pct: trade.profit_target_pct,
+      vix_at_entry: trade.vix_at_entry
+    },
+    data.settings
+  );
+
+  const historyItem = {
+    timestamp,
+    day_number: dayNumber,
+    hwm_pct: highestPnlYet,
+    current_pl_pct: Number(currentPl),
+    dte: currentDte,
+    verdict: verdict.verdict,
+    rule: verdict.rule,
+    reason: verdict.reason
+  };
+
+  const alertsSent = new Set(Array.isArray(trade.alerts_sent) ? trade.alerts_sent : []);
+  const alertsToSend = [];
+  for (const item of buildThresholdAlerts(previousHighest, highestPnlYet, data.settings)) {
+    if (!alertsSent.has(item.code)) alertsToSend.push(item);
+  }
+  const verdictAlertCode = alertCodeForVerdict(verdict);
+  if (verdictAlertCode && !alertsSent.has(verdictAlertCode)) {
+    alertsToSend.push({ code: verdictAlertCode, verdict });
+  }
+
+  const lastHistory = Array.isArray(trade.verdicts) && trade.verdicts.length ? trade.verdicts[trade.verdicts.length - 1] : null;
+  const shouldAppendHistory =
+    !lastHistory ||
+    lastHistory.current_pl_pct !== historyItem.current_pl_pct ||
+    lastHistory.hwm_pct !== historyItem.hwm_pct ||
+    lastHistory.dte !== historyItem.dte ||
+    lastHistory.rule !== historyItem.rule;
+
+  data.trades[slot] = {
+    ...trade,
+    day_number: dayNumber,
+    hwm_pct: highestPnlYet,
+    hwm_source: highestPnlYet > previousHighest ? sourceLabel : trade.hwm_source,
+    last_check: timestamp,
+    last_metrics: buildUpdatedLastMetrics(trade.last_metrics, currentPl, currentDte, highestPnlYet),
+    last_scrape_message: sourceMessage || null,
+    verdicts: shouldAppendHistory ? [...trade.verdicts, historyItem] : trade.verdicts,
+    alerts_sent: Array.from(new Set([...alertsSent, ...alertsToSend.map((item) => item.code)]))
+  };
+
+  await writeData(data);
+  for (const alert of alertsToSend) {
+    try {
+      await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), alert.verdict, data.settings);
+    } catch (error) {
+      console.error("Telegram alert failed:", error);
+    }
+  }
+
+  return { ok: true, trade: decorateTrade(data.trades[slot], data.settings), verdict };
 }
 
 export async function getDashboardData() {
@@ -145,6 +264,9 @@ export async function saveTrade(payload) {
   if (current.status === "OPEN") throw new Error(`${current.label} slot already has an open trade.`);
 
   const entryDate = payload.entry_date || todayIso(data.settings.timezone);
+  const derivedTrade = { entry_date: entryDate, expiration_date: payload.expiration_date || null, legs: payload.legs || [] };
+  const expirationDate = payload.expiration_date || deriveExpirationDate(derivedTrade);
+
   data.trades[slot] = {
     ...current,
     slot,
@@ -152,6 +274,7 @@ export async function saveTrade(payload) {
     status: "OPEN",
     id: generateTradeId(current.label, entryDate),
     entry_date: entryDate,
+    expiration_date: expirationDate,
     day_number: calculateTradeDayNumber(entryDate, todayIso(data.settings.timezone)),
     optionstrat_url: payload.optionstrat_url || null,
     legs: payload.legs || [],
@@ -172,6 +295,7 @@ export async function saveTrade(payload) {
     entry_validation_messages: validation.messages,
     last_check: null,
     last_metrics: null,
+    last_scrape_message: null,
     alerts_sent: [],
     manual_inputs: { ...freshManualInputs(), ...(payload.manual_inputs || {}) },
     verdicts: []
@@ -179,7 +303,11 @@ export async function saveTrade(payload) {
 
   await writeData(data);
   const savedTrade = decorateTrade(data.trades[slot], data.settings);
-  try { await sendTradeOpenedAlert(savedTrade, data.settings); } catch (error) { console.error("Telegram trade-open alert failed:", error); }
+  try {
+    await sendTradeOpenedAlert(savedTrade, data.settings);
+  } catch (error) {
+    console.error("Telegram trade-open alert failed:", error);
+  }
   return savedTrade;
 }
 
@@ -203,7 +331,11 @@ export async function closeTrade(id) {
   data.trades[slot].closed_at = new Date().toISOString();
   await writeData(data);
   const closedTrade = decorateTrade(data.trades[slot], data.settings);
-  try { await sendTradeClosedAlert(closedTrade, data.settings); } catch (error) { console.error("Telegram trade-close alert failed:", error); }
+  try {
+    await sendTradeClosedAlert(closedTrade, data.settings);
+  } catch (error) {
+    console.error("Telegram trade-close alert failed:", error);
+  }
   return closedTrade;
 }
 
@@ -217,84 +349,89 @@ export async function checkTrade(id, manualInputs = {}) {
   const activeOptionStratUrl = optionstratUrlOverride || trade.optionstrat_url;
   const scraped = await scrapeOptionStrat(activeOptionStratUrl, data.settings);
   const mergedManual = { ...trade.manual_inputs, ...manualOnlyInputs };
-  const derivedDte = deriveCurrentDte(trade, data.settings);
-  const currentPl = coalesceMetric(scraped.metrics?.current_pl_pct);
-  const currentDte = coalesceMetric(scraped.metrics?.current_dte, derivedDte);
-  const highestPnlYet = Math.max(trade.hwm_pct || 0, Number(coalesceMetric(scraped.metrics?.hwm_pct, currentPl ?? 0)));
-  const previousHighest = Number(trade.hwm_pct || 0);
-
+  data.trades[slot].manual_inputs = mergedManual;
   if (activeOptionStratUrl && activeOptionStratUrl !== trade.optionstrat_url) {
     data.trades[slot].optionstrat_url = activeOptionStratUrl;
   }
-  data.trades[slot].manual_inputs = mergedManual;
 
-  if (currentPl === null || currentPl === undefined) {
+  const currentPl = normalizePercentValue(scraped.metrics?.current_pl_pct);
+  if (currentPl === null) {
+    const partialDte = coalesceMetric(scraped.metrics?.current_dte, deriveCurrentDte(data.trades[slot], data.settings));
+    data.trades[slot].last_check = new Date().toISOString();
+    data.trades[slot].last_scrape_message = scraped.message;
+    data.trades[slot].last_metrics = buildUpdatedLastMetrics(trade.last_metrics, null, partialDte, Number(trade.hwm_pct || 0));
     await writeData(data);
-    return { ok: false, requiresManualInput: false, message: scraped.message, scrape: scraped, trade: decorateTrade(data.trades[slot], data.settings) };
+    return {
+      ok: false,
+      requiresManualInput: false,
+      message: scraped.message,
+      scrape: scraped,
+      trade: decorateTrade(data.trades[slot], data.settings)
+    };
   }
 
-  const payload = {
-    current_pl_pct: Number(currentPl),
-    hwm_pct: highestPnlYet,
-    current_dte: currentDte === null || currentDte === undefined ? null : Number(currentDte),
-    profit_target_pct: trade.profit_target_pct,
-    vix_at_entry: trade.vix_at_entry
-  };
+  const result = await persistTradeEvaluation(
+    data,
+    slot,
+    {
+      current_pl_pct: currentPl,
+      hwm_pct: scraped.metrics?.hwm_pct,
+      current_dte: scraped.metrics?.current_dte,
+      source: "optionstrat-poll"
+    },
+    scraped.message,
+    "optionstrat-poll"
+  );
 
-  const verdict = getDailyVerdict(payload, data.settings);
-  const timestamp = new Date().toISOString();
-  const historyItem = {
-    timestamp,
-    day_number: calculateTradeDayNumber(trade.entry_date, todayIso(data.settings.timezone)),
-    hwm_pct: highestPnlYet,
-    current_pl_pct: Number(currentPl),
-    dte: payload.current_dte,
-    verdict: verdict.verdict,
-    rule: verdict.rule,
-    reason: verdict.reason
-  };
+  return { ...result, scrape: scraped };
+}
 
-  const alertsSent = new Set(Array.isArray(trade.alerts_sent) ? trade.alerts_sent : []);
-  const alertsToSend = [];
-  for (const item of buildThresholdAlerts(previousHighest, highestPnlYet, trade, data.settings)) {
-    if (!alertsSent.has(item.code)) alertsToSend.push(item);
-  }
-  const verdictAlertCode = alertCodeForVerdict(verdict);
-  if (verdictAlertCode && !alertsSent.has(verdictAlertCode)) {
-    alertsToSend.push({ code: verdictAlertCode, verdict });
-  }
+export async function updateTradeFromApi(payload) {
+  const data = await readData();
+  const slot = getSlotById(data.trades, payload.trade_id);
+  const trade = data.trades[slot];
+  const nextProfitTarget = normalizeTargetPercent(payload.profit_target_pct) ?? trade.profit_target_pct;
 
   data.trades[slot] = {
     ...trade,
-    ...data.trades[slot],
-    day_number: historyItem.day_number,
-    optionstrat_url: activeOptionStratUrl,
-    hwm_pct: highestPnlYet,
-    hwm_source: highestPnlYet > previousHighest ? "optionstrat-poll" : trade.hwm_source,
-    last_check: timestamp,
-    last_metrics: { current_pl_pct: Number(currentPl), hwm_pct: highestPnlYet, current_dte: payload.current_dte },
-    manual_inputs: mergedManual,
-    verdicts: [...trade.verdicts, historyItem],
-    alerts_sent: [...alertsSent, ...alertsToSend.map((item) => item.code)]
+    status: trade.status === "EMPTY" ? "OPEN" : trade.status,
+    entry_date: payload.entry_date || trade.entry_date,
+    expiration_date: payload.expiration_date || trade.expiration_date || deriveExpirationDate(trade),
+    net_premium: payload.net_debit === undefined ? trade.net_premium : Number(payload.net_debit),
+    premium_per_contract: payload.net_debit === undefined ? trade.premium_per_contract : Number(payload.net_debit),
+    profit_target_pct: nextProfitTarget,
+    contracts: payload.contracts === undefined ? trade.contracts : Number(payload.contracts)
   };
 
-  await writeData(data);
-  for (const alert of alertsToSend) {
-    try {
-      await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), alert.verdict, data.settings);
-    } catch (error) {
-      console.error("Telegram alert failed:", error);
-    }
-  }
+  const result = await persistTradeEvaluation(
+    data,
+    slot,
+    {
+      current_pl_pct: payload.current_pnl_pct,
+      hwm_pct: payload.high_water_mark,
+      current_dte: payload.dte,
+      source: "api-update"
+    },
+    "External trade update received.",
+    "api-update"
+  );
 
-  return { ok: true, scrape: scraped, trade: decorateTrade(data.trades[slot], data.settings), verdict };
+  return {
+    status: "ok",
+    trade_id: result.trade.id,
+    high_water_mark: result.trade.hwm_pct,
+    trade_status: result.trade.status === "OPEN" ? "active" : String(result.trade.status || "unknown").toLowerCase(),
+    dte: result.trade.last_metrics?.current_dte ?? deriveCurrentDte(result.trade, data.settings)
+  };
 }
 
 export async function runScheduledChecks() {
   const dashboard = await getDashboardData();
   const openTrades = Object.values(dashboard.trades).filter((trade) => trade.status === "OPEN");
   const results = [];
-  for (const trade of openTrades) results.push(await checkTrade(trade.id, trade.manual_inputs));
+  for (const trade of openTrades) {
+    results.push(await checkTrade(trade.id, trade.manual_inputs));
+  }
   return results;
 }
 
