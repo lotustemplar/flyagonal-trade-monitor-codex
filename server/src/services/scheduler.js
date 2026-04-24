@@ -1,7 +1,7 @@
 import cron from "node-cron";
 import { readData } from "../lib/storage.js";
 import { refreshCalendarGate } from "./calendarGate.js";
-import { pollOpenTradesForHwm, runScheduledChecks } from "./tradeService.js";
+import { pollOpenTradesForHwm } from "./tradeService.js";
 import { todayIso } from "../lib/dateUtils.js";
 
 let tasks = [];
@@ -9,6 +9,11 @@ let tasks = [];
 function toCronExpression(timeValue) {
   const [hourString, minuteString] = String(timeValue).split(":");
   return `${Number(minuteString)} ${Number(hourString)} * * 1-5`;
+}
+
+function intervalCronExpression(intervalMinutes) {
+  const safeInterval = Math.max(1, Number(intervalMinutes) || 5);
+  return `*/${safeInterval} * * * 1-5`;
 }
 
 async function loadConfig() {
@@ -30,19 +35,11 @@ export async function startScheduler() {
     try { await refreshCalendarGate(settings, null, todayIso(timeZone)); } catch (error) { console.error("Calendar refresh failed:", error); }
   }, { timezone: timeZone });
 
-  const tradeTaskOne = cron.schedule(toCronExpression(settings.auto_poll_time_1), async () => {
-    try { await runScheduledChecks(); } catch (error) { console.error("Scheduled trade check failed:", error); }
+  const tradePollTask = cron.schedule(intervalCronExpression(settings.auto_poll_interval_minutes), async () => {
+    try { await pollOpenTradesForHwm(); } catch (error) { console.error("Scheduled 5-minute trade check failed:", error); }
   }, { timezone: timeZone });
 
-  const tradeTaskTwo = cron.schedule(toCronExpression(settings.auto_poll_time_2), async () => {
-    try { await runScheduledChecks(); } catch (error) { console.error("Scheduled trade check failed:", error); }
-  }, { timezone: timeZone });
-
-  const hwmPollTask = cron.schedule("*/2 * * * 1-5", async () => {
-    try { await pollOpenTradesForHwm(); } catch (error) { console.error("2-minute HWM poll failed:", error); }
-  }, { timezone: timeZone });
-
-  tasks = [calendarTask, tradeTaskOne, tradeTaskTwo, hwmPollTask];
+  tasks = [calendarTask, tradePollTask];
 }
 
 export async function refreshScheduler() {
