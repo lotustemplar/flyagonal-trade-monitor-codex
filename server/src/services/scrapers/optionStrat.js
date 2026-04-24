@@ -48,6 +48,15 @@ function collectPercentFromItems(items, patterns) {
   return null;
 }
 
+function collectIntegerFromItems(items, patterns) {
+  for (const item of items) {
+    const text = [item.text, item.title, item.aria].filter(Boolean).join(" ");
+    const value = extractInteger(text, patterns);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
 export async function scrapeOptionStrat(url, settings) {
   if (!url) {
     return {
@@ -145,13 +154,18 @@ export async function scrapeOptionStrat(url, settings) {
     ]);
 
     const currentDte = firstValue([
-      extractInteger(combinedText, [
+      collectIntegerFromItems(snapshot.interesting, [
         /Expirations?\s*:?\s*(\d+)d\b/i,
         /\b(\d+)\s*DTE\b/i,
         /\bDTE[^0-9]*(\d+)\b/i,
         /Days\s+to\s+Exp(?:iry|iration)?[^0-9]*(\d+)/i
       ]),
-      collectPercentFromItems(snapshot.interesting, [])
+      extractInteger(combinedText, [
+        /Expirations?\s*:?\s*(\d+)d\b/i,
+        /\b(\d+)\s*DTE\b/i,
+        /\bDTE[^0-9]*(\d+)\b/i,
+        /Days\s+to\s+Exp(?:iry|iration)?[^0-9]*(\d+)/i
+      ])
     ]);
 
     const finalHwm = firstValue([highestPnlYet, currentPl]);
