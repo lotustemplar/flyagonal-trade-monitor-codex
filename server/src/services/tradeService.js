@@ -44,8 +44,26 @@ function generateTradeId(tradeDay, entryDate) {
   return `${tradeDay.slice(0, 3).toUpperCase()}-${entryDate}`;
 }
 
-function coalesceMetric(primary, fallback) {
-  return primary === null || primary === undefined || primary === "" ? fallback : primary;
+function coalesceMetric(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== "") return value;
+  }
+  return null;
+}
+
+function deriveFrontMonthDte(trade) {
+  const legs = Array.isArray(trade?.legs) ? trade.legs : [];
+  const dtes = legs
+    .map((leg) => (leg?.dte === "" || leg?.dte === null || leg?.dte === undefined ? null : Number(leg.dte)))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return dtes.length ? Math.min(...dtes) : null;
+}
+
+function deriveCurrentDte(trade, settings) {
+  const openingDte = deriveFrontMonthDte(trade);
+  if (!openingDte || !trade?.entry_date) return null;
+  const dayNumber = calculateTradeDayNumber(trade.entry_date, todayIso(settings.timezone));
+  return Math.max(openingDte - Math.max(dayNumber - 1, 0), 0);
 }
 
 export async function getDashboardData() {
@@ -150,21 +168,27 @@ export async function checkTrade(id, manualInputs = {}) {
   const activeOptionStratUrl = optionstratUrlOverride || trade.optionstrat_url;
   const scraped = await scrapeOptionStrat(activeOptionStratUrl, data.settings);
   const mergedManual = { ...trade.manual_inputs, ...manualOnlyInputs };
-  const current_pl_pct = coalesceMetric(manualOnlyInputs.current_pl_pct, scraped.metrics?.current_pl_pct);
-  const providedHwm = coalesceMetric(manualOnlyInputs.hwm_pct, scraped.metrics?.hwm_pct);
-  const current_dte = coalesceMetric(manualOnlyInputs.current_dte, scraped.metrics?.current_dte);
-  const hwm_pct = Math.max(trade.hwm_pct || 0, Number(coalesceMetric(providedHwm, current_pl_pct ?? 0)));
-  const previousHwm = Number(trade.hwm_pct || 0);
-  const hwmImproved = hwm_pct > previousHwm;
+  const derivedDte = deriveCurrentDte(trade, data.settings);
+  const currentPl = coalesceMetric(scraped.metrics?.current_pl_pct);
+  const currentDte = coalesceMetric(scraped.metrics?.current_dte, derivedDte);
+  const highestPnlYet = Math.max(trade.hwm_pct || 0, Number(coalesceMetric(scraped.metrics?.hwm_pct, currentPl ?? 0)));
+  const previousHighest = Number(trade.hwm_pct || 0);
+  const highestImproved = highestPnlYet > previousHighest;
 
-  if (current_pl_pct === null || current_pl_pct === undefined || current_dte === null || current_dte === undefined) {
-    return { ok: false, requiresManualInput: true, message: scraped.message, scrape: scraped };
+  if (activeOptionStratUrl && activeOptionStratUrl !== trade.optionstrat_url) {
+    data.trades[slot].optionstrat_url = activeOptionStratUrl;
+  }
+  data.trades[slot].manual_inputs = mergedManual;
+
+  if (currentPl === null || currentPl === undefined) {
+    await writeData(data);
+    return { ok: false, requiresManualInput: false, message: scraped.message, scrape: scraped, trade: decorateTrade(data.trades[slot], data.settings) };
   }
 
   const payload = {
-    current_pl_pct: Number(current_pl_pct),
-    hwm_pct,
-    current_dte: Number(current_dte),
+    current_pl_pct: Number(currentPl),
+    hwm_pct: highestPnlYet,
+    current_dte: currentDte === null || currentDte === undefined ? null : Number(currentDte),
     trade_day_number: calculateTradeDayNumber(trade.entry_date, todayIso(data.settings.timezone)),
     vix_current: mergedManual.vix_current,
     vix_yesterday: mergedManual.vix_yesterday,
@@ -178,9 +202,9 @@ export async function checkTrade(id, manualInputs = {}) {
   const historyItem = {
     timestamp,
     day_number: payload.trade_day_number,
-    hwm_pct,
-    current_pl_pct: Number(current_pl_pct),
-    dte: Number(current_dte),
+    hwm_pct: highestPnlYet,
+    current_pl_pct: Number(currentPl),
+    dte: payload.current_dte,
     verdict: verdict.verdict,
     rule: verdict.rule,
     reason: verdict.reason
@@ -188,12 +212,13 @@ export async function checkTrade(id, manualInputs = {}) {
 
   data.trades[slot] = {
     ...trade,
+    ...data.trades[slot],
     day_number: payload.trade_day_number,
     optionstrat_url: activeOptionStratUrl,
-    hwm_pct,
-    hwm_source: hwmImproved ? "optionstrat-poll" : trade.hwm_source,
+    hwm_pct: highestPnlYet,
+    hwm_source: highestImproved ? "optionstrat-poll" : trade.hwm_source,
     last_check: timestamp,
-    last_metrics: { current_pl_pct: Number(current_pl_pct), hwm_pct, current_dte: Number(current_dte) },
+    last_metrics: { current_pl_pct: Number(currentPl), hwm_pct: highestPnlYet, current_dte: payload.current_dte },
     manual_inputs: mergedManual,
     verdicts: [...trade.verdicts, historyItem]
   };
@@ -202,20 +227,20 @@ export async function checkTrade(id, manualInputs = {}) {
   if (shouldAlertForVerdict(verdict) && trade.last_alert_key !== alertKey) {
     data.trades[slot].last_alert_key = alertKey;
   }
-  if (hwmImproved && verdict.rule === "HOLD") {
-    data.trades[slot].last_alert_key = `${trade.id}:HWM:${hwm_pct.toFixed(1)}`;
+  if (highestImproved && verdict.rule === "HOLD") {
+    data.trades[slot].last_alert_key = `${trade.id}:HWM:${highestPnlYet.toFixed(1)}`;
   }
 
   await writeData(data);
   if (shouldAlertForVerdict(verdict) && trade.last_alert_key !== alertKey) {
     try { await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), verdict, data.settings); } catch (error) { console.error("Telegram verdict alert failed:", error); }
   }
-  if (hwmImproved && verdict.rule === "HOLD") {
+  if (highestImproved && verdict.rule === "HOLD") {
     try {
       await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), {
-        verdict: "NEW HWM",
+        verdict: "NEW HIGHEST PNL YET",
         rule: "HWM",
-        reason: `New highest P/L reached: ${hwm_pct.toFixed(1)}%. This is the number to compare against the Day 4 / 20% binary separator.`
+        reason: `New highest P/L reached: ${highestPnlYet.toFixed(1)}%. This is the number to compare against the Day 4 / 20% binary separator.`
       }, data.settings);
     } catch (error) { console.error("Telegram HWM alert failed:", error); }
   }
