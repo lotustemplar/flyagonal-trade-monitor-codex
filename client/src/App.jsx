@@ -9,7 +9,7 @@ const LEG_TEMPLATE = [
 ];
 
 const EMPTY_VALIDATION = { status: "APPROVED", short_value: 0, long_value: 0, total_value: 0, net_premium: 0, premium_per_contract: 0, sl_ratio: 0, messages: [] };
-const SETTINGS_FIELDS = [["vix_block_low", "VIX Full Block Low", "number"], ["vix_block_high", "VIX Full Block High", "number"], ["sl_ratio_floor", "S/L Ratio Hard Floor", "number"], ["sl_ratio_preferred", "S/L Ratio Preferred Min", "number"], ["premium_per_contract_min", "Premium Per Contract Min", "number"], ["hwm_threshold_pct", "Day 4 HWM Threshold", "number"], ["profit_target_pct", "Profit Target", "number"], ["auto_poll_time_1", "Auto-Poll Time 1", "time"], ["auto_poll_time_2", "Auto-Poll Time 2", "time"]];
+const SETTINGS_FIELDS = [["vix_block_low", "VIX Full Block Low", "number"], ["vix_block_high", "VIX Full Block High", "number"], ["sl_ratio_floor", "S/L Ratio Hard Floor", "number"], ["sl_ratio_preferred", "S/L Ratio Preferred Min", "number"], ["hwm_threshold_pct", "Day 4 HWM Threshold", "number"], ["profit_target_pct", "Profit Target", "number"], ["auto_poll_time_1", "Auto-Poll Time 1", "time"], ["auto_poll_time_2", "Auto-Poll Time 2", "time"]];
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
