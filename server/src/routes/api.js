@@ -10,7 +10,8 @@ apiRouter.get("/calendar", async (req, res) => {
   try {
     const dashboard = await getDashboardData();
     const vix = req.query.vix === undefined ? null : Number(req.query.vix);
-    const result = await refreshCalendarGate(dashboard.settings, Number.isNaN(vix) ? null : vix, todayIso(dashboard.settings.timezone));
+    const targetDate = typeof req.query.date === "string" && req.query.date ? req.query.date : todayIso(dashboard.settings.timezone);
+    const result = await refreshCalendarGate(dashboard.settings, Number.isNaN(vix) ? null : vix, targetDate);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
