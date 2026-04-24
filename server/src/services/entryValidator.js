@@ -210,6 +210,16 @@ export function validateEntry(payload, settings) {
     elevate("APPROVED", "Normal structure. Full size entry approved.", "SL-NORMAL");
   }
 
+  if (payload.trade_day === "Wednesday" && vixZone.label === "CAUTION") {
+    elevate(
+      "CAUTION",
+      "CAUTION - Wednesday + Caution zone is the highest loss-rate combination. Consider skipping or reducing size.",
+      "WED-CAUTION"
+    );
+  } else if (payload.trade_day === "Thursday") {
+    elevate("APPROVED", "Thursday is the historically preferred entry day for this setup.", "THU-PREFERRED");
+  }
+
   if (vix > 0) {
     elevate(
       "APPROVED",
