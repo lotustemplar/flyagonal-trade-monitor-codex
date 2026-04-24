@@ -53,6 +53,6 @@ export function evaluateCalendarGate(events, settings, vix, currentIso) {
 }
 
 export async function refreshCalendarGate(settings, vix, currentIso) {
-  const events = await scrapeForexFactoryWindow(settings);
+  const events = await scrapeForexFactoryWindow(settings, currentIso);
   return evaluateCalendarGate(events, settings, vix, currentIso);
 }
