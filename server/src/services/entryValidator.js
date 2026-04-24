@@ -2,6 +2,10 @@ function asNumber(value) {
   return value === null || value === undefined || value === "" ? 0 : Number(value);
 }
 
+function absPremium(leg) {
+  return Math.abs(asNumber(leg.premium));
+}
+
 export function validateEntry(payload, settings) {
   const legs = Array.isArray(payload.legs) ? payload.legs : [];
   const normalizedLegs = legs.map((leg) => ({
@@ -36,12 +40,10 @@ export function validateEntry(payload, settings) {
   const vix = asNumber(payload.vix);
   const vix9d = asNumber(payload.vix9d);
 
-  const shortValue = legs
-    .filter((leg) => String(leg.direction).toUpperCase() === "STO")
-    .reduce((sum, leg) => sum + asNumber(leg.qty) * asNumber(leg.premium), 0);
-  const longValue = legs
-    .filter((leg) => String(leg.direction).toUpperCase() === "BTO")
-    .reduce((sum, leg) => sum + asNumber(leg.qty) * asNumber(leg.premium), 0);
+  const shortLegs = legs.filter((leg) => String(leg.direction).toUpperCase() === "STO");
+  const longLegs = legs.filter((leg) => String(leg.direction).toUpperCase() === "BTO");
+  const shortValue = shortLegs.reduce((sum, leg) => sum + asNumber(leg.qty) * absPremium(leg), 0);
+  const longValue = longLegs.reduce((sum, leg) => sum + asNumber(leg.qty) * absPremium(leg), 0);
   const totalValue = shortValue + longValue;
   const totalContracts = legs.reduce((sum, leg) => sum + asNumber(leg.qty), 0);
   const netDebit = longValue - shortValue;
@@ -52,7 +54,8 @@ export function validateEntry(payload, settings) {
       .map((leg) => asNumber(leg.qty))
   );
   const premiumPerContract = packageCount > 0 ? Math.abs(netDebit) / packageCount : Math.abs(netDebit);
-  const slRatio = longValue > 0 ? shortValue / longValue : 0;
+  const hasCompleteStructure = shortValue > 0 && longValue > 0;
+  const slRatio = hasCompleteStructure ? shortValue / longValue : 0;
   const messages = [];
   let status = "APPROVED";
 
@@ -118,7 +121,13 @@ export function validateEntry(payload, settings) {
     }
   }
 
-  if (slRatio < settings.sl_ratio_floor) {
+  if (!hasCompleteStructure) {
+    elevate(
+      "CAUTION",
+      "CAUTION — Ratio is waiting on complete premium inputs for both the short and long sides. Finish entering all leg premiums to validate the structure.",
+      "SL-PENDING"
+    );
+  } else if (slRatio < settings.sl_ratio_floor) {
     elevate(
       "BLOCKED",
       `BLOCKED — Ratio ${slRatio.toFixed(3)} is dangerously low. Adjust strikes to improve ratio above 0.70 before entering.`,
