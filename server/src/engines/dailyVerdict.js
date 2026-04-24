@@ -11,140 +11,78 @@ function num(value) {
 
 export function getDailyVerdict(trade, settings) {
   const currentPl = num(trade.current_pl_pct);
-  const hwm = Math.max(0, num(trade.hwm_pct) ?? 0);
+  const highestPnlYet = Math.max(0, num(trade.hwm_pct) ?? 0);
   const currentDte = num(trade.current_dte);
-  const dayNumber = num(trade.trade_day_number) ?? 0;
-  const vixCurrent = num(trade.vix_current);
-  const vixYesterday = num(trade.vix_yesterday);
-  const vix3DaysAgo = num(trade.vix_3days_ago);
-  const spxTrendDays = num(trade.spx_consecutive_days) ?? 0;
-  const macroRiskWithin2Days = Boolean(trade.macro_risk_within_2_days);
+  const profitTargetPct = num(trade.profit_target_pct) ?? settings.default_profit_target_pct;
+  const approachingThreshold = profitTargetPct * settings.approaching_profit_target_fraction;
+  const entryVix = num(trade.vix_at_entry);
+  const isCautionZone = entryVix !== null && entryVix >= settings.vix_optimal_high && entryVix < settings.vix_caution_high;
 
-  if (dayNumber === 1 && hwm <= settings.zero_profit_day_one_hwm) {
-    return {
-      verdict: "CLOSE 50%",
-      severity: "RED",
-      reason: "DAY 1 ALERT — Trade has made 0% profit since entry. Reduce to 50% size immediately. If still 0% by end of Day 2, close all remaining.",
-      rule: "E1"
-    };
-  }
-
-  if (dayNumber === 2 && hwm <= settings.zero_profit_day_two_hwm) {
-    return {
-      verdict: "CLOSE ALL",
-      severity: "RED",
-      reason: "CLOSE TRADE IMMEDIATELY — Structure has never generated any profit in 2 days. Rule E1 confirmed. Exit at market open.",
-      rule: "E1-confirmed"
-    };
-  }
-
-  if (dayNumber >= settings.binary_separator_day && hwm < settings.hwm_threshold_pct) {
-    return {
-      verdict: "CLOSE ALL",
-      severity: "RED",
-      reason: `CLOSE TRADE IMMEDIATELY — Day ${dayNumber} and trade has never crossed ${settings.hwm_threshold_pct}% HWM (current HWM: ${hwm.toFixed(1)}%). Exit at tomorrow's open.`,
-      rule: "E2"
-    };
-  }
-
-  if (hwm >= settings.hwm_threshold_pct && currentPl !== null && currentPl <= settings.reversal_close_pl_pct) {
-    return {
-      verdict: "CLOSE ALL",
-      severity: "RED",
-      reason: `CLOSE TRADE IMMEDIATELY — Trade reached ${hwm.toFixed(1)}% HWM but has given back all profit to ${currentPl.toFixed(1)}%. Exit now.`,
-      rule: "E3"
-    };
-  }
-
-  if (vixYesterday && vixCurrent && hwm < settings.hwm_threshold_pct) {
-    const vixDrop = ((vixYesterday - vixCurrent) / vixYesterday) * 100;
-    if (vixDrop >= settings.vix_collapse_pct) {
-      return {
-        verdict: "CLOSE ALL",
-        severity: "RED",
-        reason: `CLOSE TRADE — VIX collapsed ${vixDrop.toFixed(1)}% today (${vixYesterday} → ${vixCurrent}) while trade has never crossed ${settings.hwm_threshold_pct}% HWM. Exit at today's close.`,
-        rule: "E4"
-      };
-    }
-  }
-
-  if (Math.abs(spxTrendDays) >= settings.spx_trend_close_days && hwm < settings.hwm_threshold_pct) {
-    const direction = spxTrendDays > 0 ? "UP" : "DOWN";
-    return {
-      verdict: "CLOSE ALL",
-      severity: "RED",
-      reason: `CLOSE TRADE — SPX has trended ${direction} for ${Math.abs(spxTrendDays)} consecutive days while trade has never crossed ${settings.hwm_threshold_pct}% HWM. Exit today.`,
-      rule: "E5"
-    };
-  }
-
-  if (vixCurrent && vixYesterday && vix3DaysAgo && hwm < settings.hwm_threshold_pct) {
-    if (vixCurrent < vixYesterday && vixYesterday < vix3DaysAgo) {
-      return {
-        verdict: "CLOSE ALL",
-        severity: "RED",
-        reason: `CLOSE TRADE — VIX has declined 3 consecutive days (${vix3DaysAgo} → ${vixYesterday} → ${vixCurrent}) while trade has never crossed ${settings.hwm_threshold_pct}% HWM. Exit by Day 5 at the latest.`,
-        rule: "V2"
-      };
-    }
-  }
-
-  if (currentDte !== null && currentDte <= settings.close_winner_dte && hwm >= settings.hwm_threshold_pct) {
+  if (currentPl !== null && currentPl >= profitTargetPct) {
     return {
       verdict: "CLOSE ALL",
       severity: "GREEN",
-      reason: `CLOSE TRADE — PROFIT TARGET PROTOCOL. DTE is ${currentDte} and HWM reached ${hwm.toFixed(1)}%. Current P/L: ${currentPl?.toFixed(1) ?? "n/a"}%. Lock in the win.`,
-      rule: "S4-2DTE"
+      reason: `PT HIT — CLOSE NOW. Current P/L is ${currentPl.toFixed(1)}%, which meets or exceeds the ${profitTargetPct.toFixed(1)}% profit target. Close all contracts immediately.`,
+      rule: "PT-HIT"
     };
   }
 
-  if (currentDte !== null && currentDte <= settings.last_day_dte && currentPl !== null && currentPl < settings.last_day_min_profit_pct) {
-    return {
-      verdict: "CLOSE ALL",
-      severity: "AMBER",
-      reason: `CLOSE TRADE — ${settings.last_day_dte} DTE remaining with only ${currentPl.toFixed(1)}% current profit. Exit now.`,
-      rule: "D7-B"
-    };
-  }
-
-  if (macroRiskWithin2Days && currentPl !== null && currentPl > 0) {
-    return {
-      verdict: `SCALE OUT ${settings.s4_scale_out_pct}%`,
-      severity: "AMBER",
-      reason: `SCALE OUT — FOMC or NFP risk is inside the next 2 days while the trade is profitable (${currentPl.toFixed(1)}%). Reduce exposure by ${settings.s4_scale_out_pct}% before the event window.`,
-      rule: "S4"
-    };
-  }
-
-  if (hwm >= settings.profit_target_pct && currentPl !== null && currentPl >= settings.s2_pullback_low && currentPl <= settings.s2_pullback_high) {
+  if (currentDte === settings.checkpoint_scaleout_dte && highestPnlYet < settings.checkpoint_hwm_pct) {
     return {
       verdict: "SCALE OUT 50%",
       severity: "AMBER",
-      reason: `SCALE OUT — Trade reached ${hwm.toFixed(1)}% HWM but has pulled back to ${currentPl.toFixed(1)}%. Close 50% now to lock in the win.`,
-      rule: "S2"
+      reason: `4 DTE CHECKPOINT — Highest P/L yet never hit ${settings.checkpoint_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%). Scale out half at market open.`,
+      rule: "CHECKPOINT-4DTE"
     };
   }
 
-  if (currentDte !== null && currentDte <= settings.scale_out_1_dte && hwm >= settings.scale_out_1_hwm_min && currentPl !== null && currentPl >= settings.scale_out_1_current_pl_min) {
+  if (currentDte !== null && currentDte <= settings.bail_dte && highestPnlYet < settings.bail_hwm_pct) {
     return {
-      verdict: "SCALE OUT 30%",
-      severity: "AMBER",
-      reason: `SCALE OUT — At ${currentDte} DTE with HWM ${hwm.toFixed(1)}% and current P/L ${currentPl.toFixed(1)}%. Close 30% to bank partial profit.`,
-      rule: "S1"
+      verdict: "CLOSE ALL",
+      severity: "RED",
+      reason: `2 DTE BAIL — Highest P/L yet never hit ${settings.bail_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%). Close everything at market open.`,
+      rule: "BAIL-2DTE"
     };
   }
 
-  if (dayNumber === settings.day3_warning_day && hwm < settings.hwm_threshold_pct) {
+  if (isCautionZone && currentDte === settings.checkpoint_scaleout_dte && highestPnlYet >= settings.checkpoint_hwm_pct && currentPl !== null && currentPl < settings.caution_zone_pullback_pl_pct) {
     return {
-      verdict: "KEEP OPEN — DAY 3 WARNING",
+      verdict: "SCALE OUT 50%",
       severity: "AMBER",
-      reason: `WATCH CLOSELY — Day ${dayNumber} and trade has not yet crossed ${settings.hwm_threshold_pct}% HWM (current HWM: ${hwm.toFixed(1)}%). Tomorrow is the hard evaluation line.`,
-      rule: "D2-A-warning"
+      reason: `CAUTION ZONE OVERRIDE — Entry VIX was in the 16-18 zone, HWM did hit ${settings.checkpoint_hwm_pct.toFixed(1)}%, but current P/L has faded to ${currentPl.toFixed(1)}% at 4 DTE. Scale out half and tighten management.`,
+      rule: "CAUTION-4DTE"
+    };
+  }
+
+  if (currentPl !== null && currentPl >= approachingThreshold) {
+    return {
+      verdict: "KEEP TRADE OPEN — APPROACHING PT",
+      severity: "AMBER",
+      reason: `Approaching profit target — current P/L is ${currentPl.toFixed(1)}%, which is at least 85% of the ${profitTargetPct.toFixed(1)}% target. Watch closely and prepare to close.`,
+      rule: "APPROACHING-PT"
+    };
+  }
+
+  if (currentDte === settings.checkpoint_scaleout_dte && highestPnlYet >= settings.checkpoint_hwm_pct) {
+    return {
+      verdict: "KEEP TRADE OPEN",
+      severity: "GREEN",
+      reason: `4 DTE — Highest P/L yet crossed ${settings.checkpoint_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%). Trade is still on track.`,
+      rule: "PASS-4DTE"
+    };
+  }
+
+  if (currentDte !== null && currentDte <= settings.bail_dte && highestPnlYet >= settings.bail_hwm_pct) {
+    return {
+      verdict: "KEEP TRADE OPEN",
+      severity: "GREEN",
+      reason: `2 DTE — Highest P/L yet crossed ${settings.bail_hwm_pct.toFixed(1)}% (current HWM: ${highestPnlYet.toFixed(1)}%). Historical win path still intact.`,
+      rule: "PASS-2DTE"
     };
   }
 
   return {
     ...DEFAULT_VERDICT,
-    reason: `Trade is healthy. HWM: ${hwm.toFixed(1)}% | Current P/L: ${currentPl?.toFixed(1) ?? "n/a"}% | DTE: ${currentDte ?? "n/a"} | Day ${dayNumber} of trade. ${hwm >= settings.hwm_threshold_pct ? "Binary separator crossed — trade confirmed as survivor." : "HWM has not reached the binary threshold yet — continue monitoring daily."} Next check: tomorrow.`
+    reason: `Trade is active. Highest P/L yet: ${highestPnlYet.toFixed(1)}% | Current P/L: ${currentPl?.toFixed(1) ?? "n/a"}% | DTE: ${currentDte ?? "n/a"} | Profit target: ${profitTargetPct.toFixed(1)}%.`
   };
 }
