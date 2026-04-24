@@ -11,9 +11,21 @@ function toCronExpression(timeValue) {
   return `${Number(minuteString)} ${Number(hourString)} * * 1-5`;
 }
 
-function intervalCronExpression(intervalMinutes) {
-  const safeInterval = Math.max(1, Number(intervalMinutes) || 5);
-  return `*/${safeInterval} * * * 1-5`;
+function minuteList(startMinute, endMinute, intervalMinutes) {
+  const minutes = [];
+  for (let minute = startMinute; minute <= endMinute; minute += intervalMinutes) {
+    minutes.push(String(minute));
+  }
+  return minutes.join(",");
+}
+
+function marketHourCronExpressions(intervalMinutes) {
+  const safeInterval = Math.max(1, Number(intervalMinutes) || 2);
+  return [
+    `${minuteList(30, 59, safeInterval)} 9 * * 1-5`,
+    `${minuteList(0, 59, safeInterval)} 10-15 * * 1-5`,
+    `${minuteList(0, 14, safeInterval)} 16 * * 1-5`
+  ].filter((expression) => expression.split(" ")[0]);
 }
 
 async function loadConfig() {
@@ -31,15 +43,33 @@ export async function startScheduler() {
   const settings = await loadConfig();
   const timeZone = settings.timezone || "America/New_York";
 
-  const calendarTask = cron.schedule(toCronExpression(settings.calendar_refresh_time), async () => {
-    try { await refreshCalendarGate(settings, null, todayIso(timeZone)); } catch (error) { console.error("Calendar refresh failed:", error); }
-  }, { timezone: timeZone });
+  const calendarTask = cron.schedule(
+    toCronExpression(settings.calendar_refresh_time),
+    async () => {
+      try {
+        await refreshCalendarGate(settings, null, todayIso(timeZone));
+      } catch (error) {
+        console.error("Calendar refresh failed:", error);
+      }
+    },
+    { timezone: timeZone }
+  );
 
-  const tradePollTask = cron.schedule(intervalCronExpression(settings.auto_poll_interval_minutes), async () => {
-    try { await pollOpenTradesForHwm(); } catch (error) { console.error("Scheduled 5-minute trade check failed:", error); }
-  }, { timezone: timeZone });
+  const tradePollTasks = marketHourCronExpressions(settings.auto_poll_interval_minutes).map((expression) =>
+    cron.schedule(
+      expression,
+      async () => {
+        try {
+          await pollOpenTradesForHwm();
+        } catch (error) {
+          console.error(`Scheduled ${settings.auto_poll_interval_minutes}-minute trade check failed:`, error);
+        }
+      },
+      { timezone: timeZone }
+    )
+  );
 
-  tasks = [calendarTask, tradePollTask];
+  tasks = [calendarTask, ...tradePollTasks];
 }
 
 export async function refreshScheduler() {
