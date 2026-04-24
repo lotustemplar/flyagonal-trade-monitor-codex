@@ -5,9 +5,7 @@ function normalizeText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
-export async function scrapeForexFactoryWindow(settings) {
-  const startDate = todayIso(settings.timezone);
-
+export async function scrapeForexFactoryWindow(settings, startDate = todayIso(settings.timezone)) {
   return withBrowser(async (page) => {
     await page.goto("https://www.forexfactory.com/calendar", { waitUntil: "domcontentloaded", timeout: settings.manual_scrape_timeout_ms });
     await page.waitForLoadState("networkidle", { timeout: settings.manual_scrape_timeout_ms }).catch(() => {});
