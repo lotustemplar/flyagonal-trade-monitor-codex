@@ -3,7 +3,7 @@ import { readData, writeData } from "../lib/storage.js";
 import { validateEntry } from "./entryValidator.js";
 import { getDailyVerdict } from "../engines/dailyVerdict.js";
 import { scrapeOptionStrat } from "./scrapers/optionStrat.js";
-import { buildVerdictAlertKey, sendTestAlert, sendTradeClosedAlert, sendTradeOpenedAlert, sendVerdictAlert, shouldAlertForVerdict } from "./telegram.js";
+import { sendTestAlert, sendTradeClosedAlert, sendTradeOpenedAlert, sendVerdictAlert } from "./telegram.js";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -11,14 +11,10 @@ function clone(value) {
 
 function freshManualInputs() {
   return {
-    current_pl_pct: null,
-    hwm_pct: null,
-    current_dte: null,
     vix_current: null,
     vix_yesterday: null,
     vix_3days_ago: null,
-    spx_consecutive_days: 0,
-    macro_risk_within_2_days: false
+    spx_consecutive_days: 0
   };
 }
 
@@ -64,6 +60,53 @@ function deriveCurrentDte(trade, settings) {
   if (!openingDte || !trade?.entry_date) return null;
   const dayNumber = calculateTradeDayNumber(trade.entry_date, todayIso(settings.timezone));
   return Math.max(openingDte - Math.max(dayNumber - 1, 0), 0);
+}
+
+function alertCodeForVerdict(verdict) {
+  switch (verdict.rule) {
+    case "PT-HIT":
+      return "pt_hit";
+    case "CHECKPOINT-4DTE":
+    case "CAUTION-4DTE":
+      return "checkpoint";
+    case "BAIL-2DTE":
+      return "bail";
+    case "APPROACHING-PT":
+      return "approaching_pt";
+    case "PASS-4DTE":
+      return "pass_4dte";
+    case "PASS-2DTE":
+      return "pass_2dte";
+    default:
+      return null;
+  }
+}
+
+function buildThresholdAlerts(previousHwm, currentHwm, trade, settings) {
+  const alerts = [];
+  if (previousHwm < settings.checkpoint_hwm_pct && currentHwm >= settings.checkpoint_hwm_pct) {
+    alerts.push({
+      code: "hit_15",
+      verdict: {
+        verdict: "CROSSED 15%",
+        rule: "HIT-15",
+        severity: "GREEN",
+        reason: `Crossed ${settings.checkpoint_hwm_pct.toFixed(0)}% highest P/L yet — on track.`
+      }
+    });
+  }
+  if (previousHwm < settings.bail_hwm_pct && currentHwm >= settings.bail_hwm_pct) {
+    alerts.push({
+      code: "hit_20",
+      verdict: {
+        verdict: "CROSSED 20%",
+        rule: "HIT-20",
+        severity: "GREEN",
+        reason: `Crossed ${settings.bail_hwm_pct.toFixed(0)}% highest P/L yet — historical win path confirmed.`
+      }
+    });
+  }
+  return alerts;
 }
 
 export async function getDashboardData() {
@@ -113,16 +156,23 @@ export async function saveTrade(payload) {
     optionstrat_url: payload.optionstrat_url || null,
     legs: payload.legs || [],
     sl_ratio: validation.sl_ratio,
+    vix_ratio: validation.vix_ratio,
     net_premium: validation.net_premium,
     premium_per_contract: validation.premium_per_contract,
     vix_at_entry: Number(payload.vix),
     vix9d_at_entry: Number(payload.vix9d),
+    profit_target_pct: validation.profit_target_pct,
+    allocation_pct: validation.allocation_pct,
+    contracts: validation.contracts,
+    portfolio_value: payload.portfolio_value === "" || payload.portfolio_value === undefined ? null : Number(payload.portfolio_value),
+    vix_zone_label: validation.vix_zone_label,
     hwm_pct: 0,
     hwm_source: "entry",
     entry_validation_status: validation.status,
     entry_validation_messages: validation.messages,
     last_check: null,
     last_metrics: null,
+    alerts_sent: [],
     manual_inputs: { ...freshManualInputs(), ...(payload.manual_inputs || {}) },
     verdicts: []
   };
@@ -151,7 +201,6 @@ export async function closeTrade(id) {
   const slot = getSlotById(data.trades, id);
   data.trades[slot].status = "CLOSED";
   data.trades[slot].closed_at = new Date().toISOString();
-  data.trades[slot].last_alert_key = `CLOSED:${id}`;
   await writeData(data);
   const closedTrade = decorateTrade(data.trades[slot], data.settings);
   try { await sendTradeClosedAlert(closedTrade, data.settings); } catch (error) { console.error("Telegram trade-close alert failed:", error); }
@@ -173,7 +222,6 @@ export async function checkTrade(id, manualInputs = {}) {
   const currentDte = coalesceMetric(scraped.metrics?.current_dte, derivedDte);
   const highestPnlYet = Math.max(trade.hwm_pct || 0, Number(coalesceMetric(scraped.metrics?.hwm_pct, currentPl ?? 0)));
   const previousHighest = Number(trade.hwm_pct || 0);
-  const highestImproved = highestPnlYet > previousHighest;
 
   if (activeOptionStratUrl && activeOptionStratUrl !== trade.optionstrat_url) {
     data.trades[slot].optionstrat_url = activeOptionStratUrl;
@@ -189,19 +237,15 @@ export async function checkTrade(id, manualInputs = {}) {
     current_pl_pct: Number(currentPl),
     hwm_pct: highestPnlYet,
     current_dte: currentDte === null || currentDte === undefined ? null : Number(currentDte),
-    trade_day_number: calculateTradeDayNumber(trade.entry_date, todayIso(data.settings.timezone)),
-    vix_current: mergedManual.vix_current,
-    vix_yesterday: mergedManual.vix_yesterday,
-    vix_3days_ago: mergedManual.vix_3days_ago,
-    spx_consecutive_days: mergedManual.spx_consecutive_days,
-    macro_risk_within_2_days: mergedManual.macro_risk_within_2_days
+    profit_target_pct: trade.profit_target_pct,
+    vix_at_entry: trade.vix_at_entry
   };
 
   const verdict = getDailyVerdict(payload, data.settings);
   const timestamp = new Date().toISOString();
   const historyItem = {
     timestamp,
-    day_number: payload.trade_day_number,
+    day_number: calculateTradeDayNumber(trade.entry_date, todayIso(data.settings.timezone)),
     hwm_pct: highestPnlYet,
     current_pl_pct: Number(currentPl),
     dte: payload.current_dte,
@@ -210,39 +254,37 @@ export async function checkTrade(id, manualInputs = {}) {
     reason: verdict.reason
   };
 
+  const alertsSent = new Set(Array.isArray(trade.alerts_sent) ? trade.alerts_sent : []);
+  const alertsToSend = [];
+  for (const item of buildThresholdAlerts(previousHighest, highestPnlYet, trade, data.settings)) {
+    if (!alertsSent.has(item.code)) alertsToSend.push(item);
+  }
+  const verdictAlertCode = alertCodeForVerdict(verdict);
+  if (verdictAlertCode && !alertsSent.has(verdictAlertCode)) {
+    alertsToSend.push({ code: verdictAlertCode, verdict });
+  }
+
   data.trades[slot] = {
     ...trade,
     ...data.trades[slot],
-    day_number: payload.trade_day_number,
+    day_number: historyItem.day_number,
     optionstrat_url: activeOptionStratUrl,
     hwm_pct: highestPnlYet,
-    hwm_source: highestImproved ? "optionstrat-poll" : trade.hwm_source,
+    hwm_source: highestPnlYet > previousHighest ? "optionstrat-poll" : trade.hwm_source,
     last_check: timestamp,
     last_metrics: { current_pl_pct: Number(currentPl), hwm_pct: highestPnlYet, current_dte: payload.current_dte },
     manual_inputs: mergedManual,
-    verdicts: [...trade.verdicts, historyItem]
+    verdicts: [...trade.verdicts, historyItem],
+    alerts_sent: [...alertsSent, ...alertsToSend.map((item) => item.code)]
   };
 
-  const alertKey = buildVerdictAlertKey(verdict, data.trades[slot]);
-  if (shouldAlertForVerdict(verdict) && trade.last_alert_key !== alertKey) {
-    data.trades[slot].last_alert_key = alertKey;
-  }
-  if (highestImproved && verdict.rule === "HOLD") {
-    data.trades[slot].last_alert_key = `${trade.id}:HWM:${highestPnlYet.toFixed(1)}`;
-  }
-
   await writeData(data);
-  if (shouldAlertForVerdict(verdict) && trade.last_alert_key !== alertKey) {
-    try { await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), verdict, data.settings); } catch (error) { console.error("Telegram verdict alert failed:", error); }
-  }
-  if (highestImproved && verdict.rule === "HOLD") {
+  for (const alert of alertsToSend) {
     try {
-      await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), {
-        verdict: "NEW HIGHEST PNL YET",
-        rule: "HWM",
-        reason: `New highest P/L reached: ${highestPnlYet.toFixed(1)}%. This is the number to compare against the Day 4 / 20% binary separator.`
-      }, data.settings);
-    } catch (error) { console.error("Telegram HWM alert failed:", error); }
+      await sendVerdictAlert(decorateTrade(data.trades[slot], data.settings), alert.verdict, data.settings);
+    } catch (error) {
+      console.error("Telegram alert failed:", error);
+    }
   }
 
   return { ok: true, scrape: scraped, trade: decorateTrade(data.trades[slot], data.settings), verdict };
