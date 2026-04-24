@@ -14,7 +14,10 @@ export function validateEntry(payload, settings) {
   const longCallUpper = normalizedLegs.find((leg) => String(leg.role || "").toLowerCase() === "long_call_upper");
   const shortPut = normalizedLegs.find((leg) => String(leg.role || "").toLowerCase() === "short_put_calendar");
   const longPut = normalizedLegs.find((leg) => String(leg.role || "").toLowerCase() === "long_put_calendar");
-  const hasInput = payload.vix !== "" || payload.vix9d !== "" || legs.some((leg) => leg.premium !== "" || leg.dte !== "" || leg.strike !== "");
+  const hasInput =
+    payload.vix !== "" ||
+    payload.vix9d !== "" ||
+    legs.some((leg) => leg.premium !== "" || leg.dte !== "" || leg.strike !== "");
 
   if (!hasInput) {
     return {
@@ -33,13 +36,22 @@ export function validateEntry(payload, settings) {
   const vix = asNumber(payload.vix);
   const vix9d = asNumber(payload.vix9d);
 
-  const shortValue = legs.filter((leg) => String(leg.direction).toUpperCase() === "STO").reduce((sum, leg) => sum + asNumber(leg.qty) * asNumber(leg.premium), 0);
-  const longValue = legs.filter((leg) => String(leg.direction).toUpperCase() === "BTO").reduce((sum, leg) => sum + asNumber(leg.qty) * asNumber(leg.premium), 0);
+  const shortValue = legs
+    .filter((leg) => String(leg.direction).toUpperCase() === "STO")
+    .reduce((sum, leg) => sum + asNumber(leg.qty) * asNumber(leg.premium), 0);
+  const longValue = legs
+    .filter((leg) => String(leg.direction).toUpperCase() === "BTO")
+    .reduce((sum, leg) => sum + asNumber(leg.qty) * asNumber(leg.premium), 0);
   const totalValue = shortValue + longValue;
   const totalContracts = legs.reduce((sum, leg) => sum + asNumber(leg.qty), 0);
-  const netPremium = shortValue - longValue;
-  const packageCount = Math.max(1, ...legs.filter((leg) => String(leg.role || "").toLowerCase() === "short_put_calendar").map((leg) => asNumber(leg.qty)));
-  const premiumPerContract = packageCount > 0 ? Math.abs(netPremium) / packageCount : Math.abs(netPremium);
+  const netDebit = longValue - shortValue;
+  const packageCount = Math.max(
+    1,
+    ...legs
+      .filter((leg) => String(leg.role || "").toLowerCase() === "short_put_calendar")
+      .map((leg) => asNumber(leg.qty))
+  );
+  const premiumPerContract = packageCount > 0 ? Math.abs(netDebit) / packageCount : Math.abs(netDebit);
   const slRatio = longValue > 0 ? shortValue / longValue : 0;
   const messages = [];
   let status = "APPROVED";
@@ -56,35 +68,74 @@ export function validateEntry(payload, settings) {
   };
 
   if (vix < settings.vix_block_low || vix > settings.vix_block_high) {
-    elevate("BLOCKED", `BLOCKED — VIX ${vix.toFixed(1)} is outside the safe entry zone (${settings.vix_block_low}–${settings.vix_block_high}). Do not open a trade today.`, "R1");
+    elevate(
+      "BLOCKED",
+      `BLOCKED — VIX ${vix.toFixed(1)} is outside the safe entry zone (${settings.vix_block_low}–${settings.vix_block_high}). Do not open a trade today.`,
+      "R1"
+    );
   }
 
   if (shortPut && longPut && shortPut.strike !== "" && longPut.strike !== "" && shortPut.strike !== longPut.strike) {
-    elevate("CAUTION", `CAUTION — Put calendar strikes should match. Short put is ${shortPut.strike}, long put is ${longPut.strike}.`, "PUT-CALENDAR-STRIKE");
+    elevate(
+      "CAUTION",
+      `CAUTION — Put calendar strikes should match. Short put is ${shortPut.strike}, long put is ${longPut.strike}.`,
+      "PUT-CALENDAR-STRIKE"
+    );
   }
 
   if (shortPut && shortPut.dte !== "" && shortPut.dte !== 8) {
-    elevate("CAUTION", `CAUTION — Short put calendar leg should be 8 DTE. Current value is ${shortPut.dte}.`, "PUT-CALENDAR-DTE");
+    elevate(
+      "CAUTION",
+      `CAUTION — Short put calendar leg should be 8 DTE. Current value is ${shortPut.dte}.`,
+      "PUT-CALENDAR-DTE"
+    );
   }
 
   if (longPut && longPut.dte !== "" && longPut.dte !== 12) {
-    elevate("CAUTION", `CAUTION — Long put calendar leg should be 12 DTE. Current value is ${longPut.dte}.`, "PUT-CALENDAR-DTE");
+    elevate(
+      "CAUTION",
+      `CAUTION — Long put calendar leg should be 12 DTE. Current value is ${longPut.dte}.`,
+      "PUT-CALENDAR-DTE"
+    );
   }
 
-  if (shortCall && longCallLower && longCallUpper && shortCall.strike !== "" && longCallLower.strike !== "" && longCallUpper.strike !== "") {
+  if (
+    shortCall &&
+    longCallLower &&
+    longCallUpper &&
+    shortCall.strike !== "" &&
+    longCallLower.strike !== "" &&
+    longCallUpper.strike !== ""
+  ) {
     const lowerWidth = shortCall.strike - longCallLower.strike;
     const upperWidth = longCallUpper.strike - shortCall.strike;
     if (lowerWidth !== 30 || upperWidth !== 30) {
-      elevate("CAUTION", `CAUTION — Call butterfly wings should be 30 points wide. Current wings are -${lowerWidth} / +${upperWidth}.`, "CALL-BFLY-WIDTH");
+      elevate(
+        "CAUTION",
+        `CAUTION — Call butterfly wings should be 30 points wide. Current wings are -${lowerWidth} / +${upperWidth}.`,
+        "CALL-BFLY-WIDTH"
+      );
     }
   }
 
   if (slRatio < settings.sl_ratio_floor) {
-    elevate("BLOCKED", `BLOCKED — Ratio ${slRatio.toFixed(3)} is dangerously low. Adjust strikes to improve ratio above 0.70 before entering.`, "SL-FLOOR");
+    elevate(
+      "BLOCKED",
+      `BLOCKED — Ratio ${slRatio.toFixed(3)} is dangerously low. Adjust strikes to improve ratio above 0.70 before entering.`,
+      "SL-FLOOR"
+    );
   } else if (slRatio < settings.sl_ratio_low_caution) {
-    elevate("CAUTION", `WARNING — Ratio ${slRatio.toFixed(3)} indicates heavy short exposure. Maximum 50% position size.`, "SL-50");
+    elevate(
+      "CAUTION",
+      `WARNING — Ratio ${slRatio.toFixed(3)} indicates heavy short exposure. Maximum 50% position size.`,
+      "SL-50"
+    );
   } else if (slRatio < settings.sl_ratio_preferred) {
-    elevate("CAUTION", `CAUTION — Ratio ${slRatio.toFixed(3)} is on the low end. Enter at 75% size and monitor closely.`, "SL-75");
+    elevate(
+      "CAUTION",
+      `CAUTION — Ratio ${slRatio.toFixed(3)} is on the low end. Enter at 75% size and monitor closely.`,
+      "SL-75"
+    );
   } else if (slRatio >= settings.sl_ratio_well_hedged) {
     elevate("APPROVED", "Well-hedged structure. Full size entry approved.", "SL-GREEN");
   } else {
@@ -92,11 +143,19 @@ export function validateEntry(payload, settings) {
   }
 
   if (vix9d - vix > settings.vix9d_above_gap) {
-    elevate("CAUTION", `CAUTION — VIX9D (${vix9d.toFixed(1)}) significantly exceeds VIX (${vix.toFixed(1)}). Short-term IV expectations are elevated.`, "VIX9D-HIGH");
+    elevate(
+      "CAUTION",
+      `CAUTION — VIX9D (${vix9d.toFixed(1)}) significantly exceeds VIX (${vix.toFixed(1)}). Short-term IV expectations are elevated.`,
+      "VIX9D-HIGH"
+    );
   }
 
   if (vix - vix9d > settings.vix9d_below_gap) {
-    elevate("CAUTION", `CAUTION — VIX9D (${vix9d.toFixed(1)}) is well below VIX (${vix.toFixed(1)}). Short-term IV contraction may accelerate long-put decay.`, "VIX9D-LOW");
+    elevate(
+      "CAUTION",
+      `CAUTION — VIX9D (${vix9d.toFixed(1)}) is well below VIX (${vix.toFixed(1)}). Short-term IV contraction may accelerate long-put decay.`,
+      "VIX9D-LOW"
+    );
   }
 
   return {
@@ -104,7 +163,7 @@ export function validateEntry(payload, settings) {
     short_value: shortValue,
     long_value: longValue,
     total_value: totalValue,
-    net_premium: netPremium,
+    net_premium: netDebit,
     premium_per_contract: premiumPerContract,
     total_contracts: totalContracts,
     sl_ratio: slRatio,
