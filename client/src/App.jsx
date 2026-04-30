@@ -23,12 +23,12 @@ function pct(value) { return `${Number(value || 0).toFixed(1)}%`; }
 function formatDate(value) { return value ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${value}T12:00:00`)) : "-"; }
 function formatDateTime(value) { return value ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "Not yet"; }
 function statusClasses(status) { if (String(status).includes("BLOCK") || String(status).includes("CLOSE")) return "border-danger/40 bg-danger/15 text-danger"; if (String(status).includes("CAUTION") || String(status).includes("SCALE") || String(status).includes("WARNING")) return "border-amber/40 bg-amber/15 text-amber"; return "border-safe/40 bg-safe/15 text-safe"; }
-function roundToNearestTwentyFive(value) { return Number.isFinite(value) ? String(Math.round(value / 25) * 25) : ""; }
+function roundToNearestFive(value) { return Number.isFinite(value) ? String(Math.round(value / 5) * 5) : ""; }
 function legToneClasses(leg) { return String(leg.role || "").includes("put") ? "border-danger/35 bg-danger/10" : String(leg.role || "").includes("call") ? "border-safe/35 bg-safe/10" : "border-edge bg-ink/55"; }
 function legBadgeClasses(leg) { return String(leg.role || "").includes("put") ? "border-danger/40 bg-danger/15 text-danger" : String(leg.role || "").includes("call") ? "border-safe/40 bg-safe/15 text-safe" : "border-edge bg-panel text-slate-300"; }
 
 function deriveLegsFromStructure(form) {
-  const putStrike = roundToNearestTwentyFive(Number(form.spx_price) * 0.981);
+  const putStrike = roundToNearestFive(Number(form.spx_price) * 0.981);
   const shortCallStrike = Number(form.short_call_strike);
   const hasShortCall = Number.isFinite(shortCallStrike) && form.short_call_strike !== "";
   const lowerWing = hasShortCall ? String(shortCallStrike - 30) : "";
